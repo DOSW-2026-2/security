@@ -213,9 +213,13 @@ Cada bloque trae un **ejemplo** con otro dominio (pedidos de un cliente) para il
 ### Bloque 0 · Arranque (`feature/setup`)
 
 1. Creen el repositorio de su equipo. No olviden crear los archivos `README` y `.gitignore` y la rama `develop`.
-2. Generen el proyecto con Spring Initializr: Web, Security, Data JPA, Validation, PostgreSQL, H2 (`test`) y Spring Security Test (`test`). Agreguen `jjwt` 0.12 o superior (`jjwt-api`, y `jjwt-impl` y `jjwt-jackson` en `runtime`).
-3. Creen los paquetes de la sección 7, levanten PostgreSQL y compilen.
-4. Excluyan del repositorio `.env`, `target/` y `logs/` incluyéndolos en el archivo `.gitignore`; creen un `.env.example` sin valores secretos.
+2. Generen el proyecto con Spring Initializr.
+
+   <img width="642" height="178" alt="image" src="https://github.com/user-attachments/assets/de9f54c2-06e6-4b8b-a622-cce493507ee7" />
+
+3. Adicionen las dependencias de SpringSecurity, JWT y Pruebas. Usen el ejemplo que se relaciona abajo.
+4. Creen los paquetes de la sección 7, levanten PostgreSQL y compilen.
+5. Excluyan del repositorio `.env`, `target/` y `logs/` incluyéndolos en el archivo `.gitignore`; creen un `.env.example` sin valores secretos.
 
 **Ejemplo · dependencias, variables y `.gitignore`:**
 
@@ -244,6 +248,21 @@ Cada bloque trae un **ejemplo** con otro dominio (pedidos de un cliente) para il
 <dependency>
   <groupId>org.springframework.security</groupId>
   <artifactId>spring-security-test</artifactId>
+  <scope>test</scope>
+</dependency>
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-webmvc-test</artifactId>
+  <scope>test</scope>
+</dependency>
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-test</artifactId>
+  <scope>test</scope>
+</dependency>
+<dependency>
+  <groupId>com.h2database</groupId>
+  <artifactId>h2</artifactId>
   <scope>test</scope>
 </dependency>
 ```
@@ -329,10 +348,15 @@ app.jwt.ttl-minutes=30
 **Ejemplo · DTO validado, `PasswordEncoder`, servicio y manejo del `409`:**
 
 ```java
+public enum Rol { CLIENTE, VENDEDOR, ADMIN }
+```
+
+```java
 public record RegistroRequest(
         @NotBlank String nombre,
         @NotBlank @Email String correo,
-        @NotBlank @Size(min = 8) String password) {}
+        @NotBlank @Size(min = 8) String password,
+        @NotNull Rol rol) {}}
 ```
 
 ```java
@@ -343,7 +367,12 @@ PasswordEncoder passwordEncoder() {
 ```
 
 ```java
+private static final Set<Rol> ROLES_PUBLICOS = EnumSet.of(Rol.CLIENTE, Rol.VENDEDOR);
+
 public UsuarioResponse registrar(RegistroRequest req) {
+    if (!ROLES_PUBLICOS.contains(req.rol())) {
+        throw new RolNoPermitidoException("Rol no permitido en el registro");   // 400
+    }
     String correo = req.correo().trim().toLowerCase();
     if (usuarioRepository.existsByCorreo(correo)) {
         throw new CorreoDuplicadoException(correo);
@@ -352,8 +381,33 @@ public UsuarioResponse registrar(RegistroRequest req) {
     u.setNombre(req.nombre());
     u.setCorreo(correo);
     u.setPasswordHash(passwordEncoder.encode(req.password()));
-    u.setRol(Rol.CLIENTE);                       // el rol lo decide el servidor, no el cliente
+    u.setRol(req.rol());                         // ya validado contra la lista de roles públicos
     return mapper.toResponse(usuarioRepository.save(u));
+}
+```
+
+```java
+public class RolNoPermitidoException extends RuntimeException {
+    public RolNoPermitidoException(String mensaje) { super(mensaje); }
+}
+```
+
+```java
+package edu.eci.dosw.oficioya.dto;
+
+import java.time.LocalDateTime;
+
+  public record ApiError(
+          LocalDateTime timestamp,
+          int status,
+          String error,
+          String mensaje,
+          String ruta) {
+  
+      public static ApiError of(int status, String error, String mensaje, String ruta) {
+          return new ApiError(LocalDateTime.now(), status, error, mensaje, ruta);
+      }
+  }
 }
 ```
 
@@ -362,14 +416,39 @@ public UsuarioResponse registrar(RegistroRequest req) {
 public class ApiExceptionHandler {
 
     @ExceptionHandler(CorreoDuplicadoException.class)
-    ResponseEntity<ErrorResponse> duplicado(CorreoDuplicadoException ex, HttpServletRequest req) {
+    ResponseEntity<ApiError> duplicado(CorreoDuplicadoException ex, HttpServletRequest req) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(
-                ErrorResponse.of(409, "Conflict", "El correo ya está registrado", req.getRequestURI()));
+                ApiError.of(409, "Conflict", "El correo ya está registrado", req.getRequestURI()));
     }
 }
 ```
 
-Falta, por ejemplo, un manejador análogo para `MethodArgumentNotValidException` (`400`).
+```java
+@ExceptionHandler(RolNoPermitidoException.class)
+ResponseEntity<ApiError> rolNoPermitido(RolNoPermitidoException ex, HttpServletRequest req) {
+    return ResponseEntity.badRequest().body(
+            ApiError.of(400, "Bad Request", ex.getMessage(), req.getRequestURI()));
+}
+
+@ExceptionHandler(MethodArgumentNotValidException.class)
+ResponseEntity<ApiError> datosInvalidos(MethodArgumentNotValidException ex, HttpServletRequest req) {
+    return ResponseEntity.badRequest().body(
+            ApiError.of(400, "Bad Request", "Datos de registro inválidos", req.getRequestURI()));
+}
+
+@ExceptionHandler(HttpMessageNotReadableException.class)   // p. ej. "rol": "JEFE"
+ResponseEntity<ApiError> cuerpoIlegible(HttpMessageNotReadableException ex, HttpServletRequest req) {
+    return ResponseEntity.badRequest().body(
+            ApiError.of(400, "Bad Request", "Cuerpo de la petición inválido", req.getRequestURI()));
+}
+```
+
+```java
+@PostMapping("/registro")
+public ResponseEntity<UsuarioResponse> registrar(@RequestBody @Valid RegistroRequest req) {
+    return ResponseEntity.status(HttpStatus.CREATED).body(usuarioService.registrar(req));
+}
+```
 
 ### Bloque 3 · JWT y login (`feature/jwt`)
 
@@ -405,7 +484,7 @@ public class JwtService {
                 .issuer(issuer)
                 .issuedAt(Date.from(ahora))
                 .expiration(Date.from(ahora.plus(ttlMinutes, ChronoUnit.MINUTES)))
-                .signWith(key)
+                .signWith(key, Jwts.SIG.HS256)   // fija HS256 sin importar el largo de la clave
                 .compact();
     }
 
@@ -502,15 +581,20 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 @Component
 public class JsonAuthenticationEntryPoint implements AuthenticationEntryPoint {
 
+    private final ObjectMapper objectMapper;
+
+    public JsonAuthenticationEntryPoint(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
+    }
+
     @Override
     public void commence(HttpServletRequest req, HttpServletResponse res,
                          AuthenticationException ex) throws IOException {
         res.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-        res.setContentType("application/json");
+        res.setContentType(MediaType.APPLICATION_JSON_VALUE);
         res.setCharacterEncoding("UTF-8");
-        // En su proyecto, escriban el ErrorResponse con ObjectMapper en lugar de armar el texto a mano
-        res.getWriter().write("{\"status\":401,\"error\":\"Unauthorized\","
-                + "\"mensaje\":\"Token inválido o expirado\"}");
+        objectMapper.writeValue(res.getWriter(),
+                ApiError.of(401, "Unauthorized", "Token inválido o expirado", req.getRequestURI()));
     }
 }
 ```
@@ -639,6 +723,21 @@ Comando de referencia: `mvn clean verify`.
 **Ejemplo · tres pruebas con MockMvc (token alterado, vencido y recurso ajeno):**
 
 ```java
+package edu.eci.dosw.oficioya;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import edu.eci.dosw.oficioya.security.JwtService;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;   // Boot 4
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.web.servlet.MockMvc;
+
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
@@ -788,7 +887,7 @@ Respondan en `docs/informe-seguridad.md`, con ejemplos de **su** implementación
 - Commits con el formato `tipo: descripción`, con `feat`, `fix`, `test`, `docs` o `chore`.
 - Cada PR a `develop` lo revisa y aprueba un integrante distinto de su autor.
 - Al final, un PR de `develop` a `main`.
-- **Los cuatro integrantes deben tener commits y haber revisado al menos un PR.**
+- **Los integrantes deben tener commits y haber revisado al menos un PR.**
 
 ## 14. Evaluación
 
